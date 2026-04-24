@@ -12,6 +12,25 @@ repository = "https://github.com/Open-PiliPili/EmbyStream"
 keywords = ["emby", "streaming", "media", "cli"]
 categories = ["command-line-utilities", "multimedia"]
 description = "Another Emby streaming application (frontend/backend separation) written in Rust."
+include = [
+  "/Cargo.toml",
+  "/Cargo.lock",
+  "/build.rs",
+  "/README.md",
+  "/LICENSE",
+  "/config.toml",
+  "/docs/**",
+  "/locales/en.json",
+  "/locales/zh.json",
+  "/res/imgs/logo.jpg",
+  "/res/imgs/run_log.png",
+  "/scripts/build-binary.sh",
+  "/scripts/build-docker.sh",
+  "/src/**",
+  "/web/dist/**",
+  "!**/.DS_Store",
+  "!/web/dist/.DS_Store",
+]
 
 [profile.release]
 strip = true
