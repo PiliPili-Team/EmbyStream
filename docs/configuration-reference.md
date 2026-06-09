@@ -203,7 +203,7 @@ replacement = "$1"
 | Field    | Type   | Description |
 |----------|--------|-------------|
 | `enable` | bool   | Reject requests whose `Host` matches none of the trusted hosts. |
-| `host`   | string \| string[] | Trusted host(s) (hostname only; scheme stripped if present). Accepts a single string or a list of domains. A request is allowed when its `Host` matches any entry. |
+| `host`   | string \| string[] | Trusted host(s) (hostname only; scheme stripped if present). Accepts a single string or a list of domains. A request is allowed when its `Host` matches any entry. A leading `*.` makes an entry a wildcard. |
 
 **Example — only accept your public domain**
 
@@ -220,6 +220,18 @@ host = "stream.example.com"
 enable = true
 host = ["a.example.com", "b.example.com"]
 ```
+
+**Example — wildcard subdomains**
+
+```toml
+[Frontend.AntiReverseProxy]
+enable = true
+host = ["example.com", "*.example.com"]
+```
+
+`*.example.com` matches any subdomain at any depth (`a.example.com`,
+`x.y.example.com`) but **not** the apex `example.com` — list the apex explicitly
+when you also want it allowed.
 
 The legacy single-string form is still accepted and is treated as a one-element
 list, so existing configs keep working unchanged.

@@ -48,6 +48,8 @@ replacement = "/proxy$1"
 # `host` accepts a single domain (`host = "a.example.com"`) or a list
 # (`host = ["a.example.com", "b.example.com"]`). A request is allowed when its
 # Host header matches any entry; the single-string form stays supported.
+# A leading `*.` is a wildcard: `*.example.com` matches any subdomain but not
+# the apex `example.com` itself (list it explicitly to allow the apex too).
 [Frontend.AntiReverseProxy]
 enable = false
 host = ""

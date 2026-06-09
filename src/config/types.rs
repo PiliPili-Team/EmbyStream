@@ -121,12 +121,33 @@ where
     deserializer.deserialize_any(TrustedHostsVisitor)
 }
 
+/// Tests whether `request_host` (already lower-cased, bare hostname) satisfies a
+/// single trusted-host entry.
+///
+/// A leading `*.` marks a wildcard: `*.example.com` matches any subdomain of
+/// `example.com` at any depth (`a.example.com`, `x.y.example.com`) but not the
+/// apex `example.com` itself. Entries without the prefix are matched exactly.
+fn host_matches_trusted(trusted: &str, request_host: &str) -> bool {
+    if let Some(suffix) = trusted.trim().strip_prefix("*.") {
+        let Some(base) = extract_valid_host(suffix) else {
+            return false;
+        };
+        let needle = format!(".{}", base.to_ascii_lowercase());
+        return request_host.len() > needle.len()
+            && request_host.ends_with(&needle);
+    }
+
+    extract_valid_host(trusted)
+        .is_some_and(|t| t.eq_ignore_ascii_case(request_host))
+}
+
 impl AntiReverseProxyConfig {
     /// Returns `true` when the request `host` should be blocked because it does
     /// not match any configured trusted host.
     ///
-    /// Disabled config, an empty trusted list, or an unparseable request host
-    /// all yield `false` (request allowed) to preserve fail-open behavior.
+    /// Trusted entries may be exact hostnames or `*.domain` wildcards. Disabled
+    /// config, an empty trusted list, or an unparseable request host all yield
+    /// `false` (request allowed) to preserve fail-open behavior.
     #[inline]
     pub fn is_need_anti(&self, host: &str) -> bool {
         if !self.enable || self.trusted_hosts.is_empty() {
@@ -136,11 +157,12 @@ impl AntiReverseProxyConfig {
         let Some(request_host) = extract_valid_host(host) else {
             return false;
         };
+        let request_host = request_host.to_ascii_lowercase();
 
-        let matches_trusted = self.trusted_hosts.iter().any(|trusted| {
-            extract_valid_host(trusted)
-                .is_some_and(|t| t.eq_ignore_ascii_case(request_host))
-        });
+        let matches_trusted = self
+            .trusted_hosts
+            .iter()
+            .any(|trusted| host_matches_trusted(trusted, &request_host));
 
         !matches_trusted
     }
@@ -275,6 +297,43 @@ mod anti_reverse_proxy_tests {
             "#,
         );
         assert!(!empty.is_need_anti("evil.example.com"));
+    }
+
+    #[test]
+    fn wildcard_matches_subdomains_at_any_depth() {
+        let config = parse(
+            r#"
+            [AntiReverseProxy]
+            enable = true
+            host = "*.example.com"
+            "#,
+        );
+
+        // Subdomains at any depth are allowed.
+        assert!(!config.is_need_anti("a.example.com"));
+        assert!(!config.is_need_anti("x.y.example.com"));
+        assert!(!config.is_need_anti("A.Example.com:443"));
+        // The apex domain is NOT covered by the wildcard.
+        assert!(config.is_need_anti("example.com"));
+        // Look-alike suffixes must not match.
+        assert!(config.is_need_anti("notexample.com"));
+        assert!(config.is_need_anti("evil.com"));
+    }
+
+    #[test]
+    fn apex_and_wildcard_can_be_combined() {
+        let config = parse(
+            r#"
+            [AntiReverseProxy]
+            enable = true
+            host = ["example.com", "*.example.com"]
+            "#,
+        );
+
+        assert!(!config.is_need_anti("example.com"));
+        assert!(!config.is_need_anti("a.example.com"));
+        assert!(!config.is_need_anti("deep.sub.example.com"));
+        assert!(config.is_need_anti("evil.com"));
     }
 
     #[test]
