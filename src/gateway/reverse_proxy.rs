@@ -339,18 +339,35 @@ impl ReverseProxyMiddleware {
             .is_some_and(|value| value.eq_ignore_ascii_case("application/json"))
     }
 
+    /// Joins the Emby base URL with the incoming `path?query` while keeping
+    /// exactly one slash between them.
+    ///
+    /// `Uri::to_string()` normalizes an authority-only URL such as
+    /// `http://host:8096` into `http://host:8096/` (a trailing slash is
+    /// always appended). Naively concatenating that with a request target
+    /// like `/emby/Users/{id}` would yield `http://host:8096//emby/...`.
+    /// The extra empty path segment breaks Emby's route binding for
+    /// `Guid`-typed parameters and surfaces as `Unrecognized Guid format.`.
+    fn build_target_url(base: &str, path_and_query: &str) -> String {
+        let base = base.trim_end_matches('/');
+        if path_and_query.starts_with('/') {
+            format!("{base}{path_and_query}")
+        } else {
+            format!("{base}/{path_and_query}")
+        }
+    }
+
     async fn proxy_to_emby(
         &self,
         ctx: &Context,
         body_bytes: Option<Bytes>,
     ) -> Result<reqwest::Response, reqwest::Error> {
-        let target_url = format!(
-            "{}{}",
-            self.emby_base_url,
+        let target_url = Self::build_target_url(
+            &self.emby_base_url,
             ctx.uri
                 .path_and_query()
                 .map(|pq| pq.as_str())
-                .unwrap_or(ctx.path.as_str())
+                .unwrap_or(ctx.path.as_str()),
         );
 
         debug_log!(
@@ -756,6 +773,41 @@ mod tests {
             Instant::now(),
             "request-1".into(),
         )
+    }
+
+    #[test]
+    fn build_target_url_collapses_double_slash_from_normalized_base() {
+        // `Uri::to_string()` yields a trailing slash for authority-only URLs.
+        let url = ReverseProxyMiddleware::build_target_url(
+            "http://emby:8096/",
+            "/emby/Users/3ef6a13df13e48b3ae594f22804150b8?reqformat=json",
+        );
+
+        assert_eq!(
+            url,
+            "http://emby:8096/emby/Users/3ef6a13df13e48b3ae594f22804150b8?reqformat=json"
+        );
+        assert!(!url.contains("8096//"));
+    }
+
+    #[test]
+    fn build_target_url_keeps_single_slash_without_trailing_base_slash() {
+        let url = ReverseProxyMiddleware::build_target_url(
+            "http://emby:8096",
+            "/emby/Items/1",
+        );
+
+        assert_eq!(url, "http://emby:8096/emby/Items/1");
+    }
+
+    #[test]
+    fn build_target_url_inserts_slash_when_path_missing_leading_slash() {
+        let url = ReverseProxyMiddleware::build_target_url(
+            "http://emby:8096",
+            "emby/Items/1",
+        );
+
+        assert_eq!(url, "http://emby:8096/emby/Items/1");
     }
 
     #[test]
