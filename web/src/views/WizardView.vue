@@ -367,10 +367,36 @@ function normalizePathRewrite(
 function normalizeAntiReverseProxy(
   config?: Partial<AntiReverseProxyConfig>,
 ): AntiReverseProxyConfig {
+  const rawHost = config?.host as unknown;
+  let host: string[];
+  if (Array.isArray(rawHost)) {
+    host = rawHost
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  } else if (typeof rawHost === "string" && rawHost.trim().length > 0) {
+    // Backward compatibility with the legacy single-string form.
+    host = [rawHost.trim()];
+  } else {
+    host = [];
+  }
   return {
     enable: config?.enable ?? false,
-    host: config?.host ?? "",
+    host,
   };
+}
+
+/** Renders the trusted-host list as a comma-separated editable string. */
+function hostsToText(hosts: string[]): string {
+  return hosts.join(", ");
+}
+
+/** Parses comma/whitespace-separated input into a trimmed trusted-host list. */
+function textToHosts(text: string): string[] {
+  return text
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
 }
 
 function createNginxPayload(): NginxConfigPayload {
@@ -481,7 +507,7 @@ function createBackendNode(type: BackendNodeType): BackendNodeConfig {
     path_rewrites: [createPathRewrite("", "", false)],
     anti_reverse_proxy: {
       enable: false,
-      host: "",
+      host: [],
     },
     disk: null,
     open_list: null,
@@ -1508,8 +1534,16 @@ function enabledRewriteCount(rewrites: PathRewriteConfig[]) {
                     :label="t('wizard.frontendAntiHostLabel')"
                   >
                     <input
-                      v-model="draft.payload.frontend.anti_reverse_proxy.host"
+                      :value="
+                        hostsToText(
+                          draft.payload.frontend.anti_reverse_proxy.host,
+                        )
+                      "
                       type="text"
+                      @change="
+                        draft.payload.frontend.anti_reverse_proxy.host =
+                          textToHosts(($event.target as HTMLInputElement).value)
+                      "
                     />
                   </FieldBlock>
                 </template>
@@ -2003,8 +2037,13 @@ function enabledRewriteCount(rewrites: PathRewriteConfig[]) {
                           :label="t('wizard.nodeAntiHostLabel')"
                         >
                           <input
-                            v-model="node.anti_reverse_proxy.host"
+                            :value="hostsToText(node.anti_reverse_proxy.host)"
                             type="text"
+                            @change="
+                              node.anti_reverse_proxy.host = textToHosts(
+                                ($event.target as HTMLInputElement).value,
+                              )
+                            "
                           />
                         </FieldBlock>
                       </div>

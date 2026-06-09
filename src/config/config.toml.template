@@ -45,6 +45,9 @@ enable = false
 pattern = "^/stream(/.*)$"
 replacement = "/proxy$1"
 
+# `host` accepts a single domain (`host = "a.example.com"`) or a list
+# (`host = ["a.example.com", "b.example.com"]`). A request is allowed when its
+# Host header matches any entry; the single-string form stays supported.
 [Frontend.AntiReverseProxy]
 enable = false
 host = ""

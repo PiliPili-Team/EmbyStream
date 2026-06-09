@@ -202,8 +202,8 @@ replacement = "$1"
 
 | Field    | Type   | Description |
 |----------|--------|-------------|
-| `enable` | bool   | Reject requests whose `Host` does not match the trusted host. |
-| `host`   | string | Trusted host (hostname only; scheme stripped if present). |
+| `enable` | bool   | Reject requests whose `Host` matches none of the trusted hosts. |
+| `host`   | string \| string[] | Trusted host(s) (hostname only; scheme stripped if present). Accepts a single string or a list of domains. A request is allowed when its `Host` matches any entry. |
 
 **Example — only accept your public domain**
 
@@ -212,6 +212,17 @@ replacement = "$1"
 enable = true
 host = "stream.example.com"
 ```
+
+**Example — accept multiple domains**
+
+```toml
+[Frontend.AntiReverseProxy]
+enable = true
+host = ["a.example.com", "b.example.com"]
+```
+
+The legacy single-string form is still accepted and is treated as a one-element
+list, so existing configs keep working unchanged.
 
 ---
 

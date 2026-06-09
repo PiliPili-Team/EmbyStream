@@ -60,7 +60,11 @@ export interface PathRewriteConfig {
 
 export interface AntiReverseProxyConfig {
   enable: boolean;
-  host: string;
+  /**
+   * Trusted hosts allowed to access the proxied service. Multiple domains are
+   * supported; the backend also accepts the legacy single-string form on read.
+   */
+  host: string[];
 }
 
 export type BackendNodeType =

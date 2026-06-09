@@ -33,8 +33,8 @@ struct EmitPathRewrite {
 struct EmitAntiRev {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     enable: bool,
-    #[serde(skip_serializing_if = "str::is_empty", rename = "host")]
-    trusted_host: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", rename = "host")]
+    trusted_hosts: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -100,13 +100,13 @@ fn map_path_rewrite(p: &PathRewriteConfig) -> EmitPathRewrite {
 fn map_anti(p: &AntiReverseProxyConfig) -> EmitAntiRev {
     EmitAntiRev {
         enable: p.enable,
-        trusted_host: p.trusted_host.clone(),
+        trusted_hosts: p.trusted_hosts.clone(),
     }
 }
 
 /// Omit `[*.AntiReverseProxy]` when disabled and no trusted host (matches runtime defaults).
 fn anti_reverse_absent(p: &AntiReverseProxyConfig) -> bool {
-    !p.enable && p.trusted_host.trim().is_empty()
+    !p.enable && p.trusted_hosts.is_empty()
 }
 
 fn map_anti_opt(p: &AntiReverseProxyConfig) -> Option<EmitAntiRev> {
@@ -293,7 +293,7 @@ struct WizardEmitUserAgent {
 struct WizardEmitAntiRev {
     enable: bool,
     #[serde(rename = "host")]
-    trusted_host: String,
+    trusted_hosts: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -354,7 +354,7 @@ fn map_anti_wizard_opt(
     } else {
         Some(WizardEmitAntiRev {
             enable: p.enable,
-            trusted_host: p.trusted_host.clone(),
+            trusted_hosts: p.trusted_hosts.clone(),
         })
     }
 }

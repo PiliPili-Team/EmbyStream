@@ -1147,27 +1147,34 @@ fn prompt_anti_reverse(ctx: impl AsRef<str>) -> Result<AntiReverseProxyConfig> {
     );
     let enable_msg = tr_fmt("wizard.prompt.enable_anti", &[("ctx", ctx)]);
     let enable = confirm_yes_no(&enable_msg, false)?;
-    let host: String = if enable {
+    let hosts: Vec<String> = if enable {
         intro(
             tr("wizard.field.host"),
             tr("wizard.prompt.trusted_host_header"),
             None,
             Some(tr("wizard.example.host.stream_example").as_str()),
         );
-        let h: String = wiz_input_string_no_echo(None, false)?;
-        let disp = if h.trim().is_empty() {
+        let raw: String = wiz_input_string_no_echo(None, false)?;
+        // Accept multiple hosts separated by comma, whitespace or newline.
+        let parsed: Vec<String> = raw
+            .split([',', ' ', '\n', '\t'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        let disp = if parsed.is_empty() {
             empty_display()
         } else {
-            h.trim().to_string()
+            parsed.join(", ")
         };
         print_field_value_line(&disp);
-        h
+        parsed
     } else {
-        String::new()
+        Vec::new()
     };
     Ok(AntiReverseProxyConfig {
         enable,
-        trusted_host: host,
+        trusted_hosts: hosts,
     })
 }
 

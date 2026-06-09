@@ -71,7 +71,7 @@ fn fallback_template() -> FallbackConfig {
 fn anti_rev_default() -> AntiReverseProxyConfig {
     AntiReverseProxyConfig {
         enable: false,
-        trusted_host: String::new(),
+        trusted_hosts: Vec::new(),
     }
 }
 

@@ -258,8 +258,12 @@ fn default_nginx_payload_from_raw(raw: &RawConfig) -> WizardNginxPayload {
     let frontend_server_name = raw
         .frontend
         .as_ref()
-        .map(|frontend| {
-            strip_scheme_host(&frontend.anti_reverse_proxy.trusted_host)
+        .and_then(|frontend| {
+            frontend
+                .anti_reverse_proxy
+                .trusted_hosts
+                .first()
+                .map(|host| strip_scheme_host(host))
         })
         .filter(|value| !value.is_empty())
         .or_else(|| {
@@ -449,7 +453,7 @@ mod tests {
         let node = &request.payload.backend_nodes[0];
         assert_eq!(node.backend_type, "Disk");
         assert_eq!(node.path_rewrites.len(), 1);
-        assert_eq!(node.anti_reverse_proxy.trusted_host, "");
+        assert!(node.anti_reverse_proxy.trusted_hosts.is_empty());
         assert!(node.disk.is_some());
     }
 
