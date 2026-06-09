@@ -101,10 +101,12 @@ async fn run_app(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     setup_figlet();
 
+    let web_enabled = web_studio_enabled(run_args);
+
     match setup_load_config(run_args) {
         Ok(LoadConfigOutcome::Loaded(config)) => {
             let config = *config;
-            if run_args.web {
+            if web_enabled {
                 start_web_service(build_run_web_runtime_config(
                     run_args,
                     Some(&config),
@@ -112,7 +114,7 @@ async fn run_app(
             }
 
             if let Err(error) = initialize_stream_runtime(&config).await {
-                if run_args.web {
+                if web_enabled {
                     eprintln!(
                         "Stream startup skipped because the runtime config is not ready: {}",
                         error
@@ -133,7 +135,7 @@ async fn run_app(
             }
         }
         Ok(LoadConfigOutcome::TemplateCreated(config_path)) => {
-            if run_args.web {
+            if web_enabled {
                 start_web_service(build_run_web_runtime_config(
                     run_args, None,
                 )?);
@@ -158,7 +160,7 @@ async fn run_app(
             }
         }
         Err(error) => {
-            if run_args.web {
+            if web_enabled {
                 start_web_service(build_run_web_runtime_config(
                     run_args, None,
                 )?);
@@ -321,6 +323,35 @@ fn start_web_service(config: WebRuntimeConfig) {
             eprintln!("Web studio failed: {}", error);
         }
     });
+}
+
+/// Environment variable that overrides whether the web configuration studio
+/// starts alongside `run`. Recognized over both upper- and lower-case names.
+const WEB_ENABLE_ENV_KEYS: &[&str] = &["WEB_ENABLE", "web_enable"];
+
+/// Reports whether the web studio should start alongside `run`.
+///
+/// When `WEB_ENABLE` (or its lower-case alias) is set to a recognized boolean
+/// value, it takes precedence over the `--web` flag. This lets deployments such
+/// as the Docker image, which bakes `--web` into its default command, toggle
+/// the studio purely through an environment variable. When the variable is
+/// unset or holds an unrecognized value, the `--web` flag is used unchanged.
+fn web_studio_enabled(run_args: &RunArgs) -> bool {
+    WEB_ENABLE_ENV_KEYS
+        .iter()
+        .find_map(|key| std::env::var(key).ok())
+        .and_then(|value| parse_env_bool(&value))
+        .unwrap_or(run_args.web)
+}
+
+/// Parses a boolean-like environment value, ignoring case and surrounding
+/// whitespace. Returns `None` for unrecognized values so callers can fall back.
+fn parse_env_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" | "enable" | "enabled" => Some(true),
+        "0" | "false" | "no" | "off" | "disable" | "disabled" => Some(false),
+        _ => None,
+    }
 }
 
 fn setup_logger(config: &Config) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -534,4 +565,32 @@ fn default_handler() -> Handler {
         debug_log!(GATEWAY_LOGGER_DOMAIN, "Fallback to default middleware...");
         ResponseBuilder::with_status_code(StatusCode::SERVICE_UNAVAILABLE)
     })
+}
+
+#[cfg(test)]
+mod web_enable_env_tests {
+    use super::parse_env_bool;
+
+    #[test]
+    fn parses_truthy_values_case_and_space_insensitively() {
+        for value in ["1", "true", "TRUE", " yes ", "On", "enable", "ENABLED"] {
+            assert_eq!(parse_env_bool(value), Some(true), "value = {value:?}");
+        }
+    }
+
+    #[test]
+    fn parses_falsy_values_case_and_space_insensitively() {
+        for value in
+            ["0", "false", "FALSE", " no ", "Off", "disable", "DISABLED"]
+        {
+            assert_eq!(parse_env_bool(value), Some(false), "value = {value:?}");
+        }
+    }
+
+    #[test]
+    fn returns_none_for_unrecognized_values() {
+        for value in ["", "maybe", "2", "web"] {
+            assert_eq!(parse_env_bool(value), None, "value = {value:?}");
+        }
+    }
 }

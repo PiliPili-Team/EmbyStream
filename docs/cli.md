@@ -100,6 +100,7 @@ Options:
 | Option | Description |
 |--------|-------------|
 | `-c, --config <FILE>` | Path to `config.toml`. |
+| `--web` | Also start the Web Config Studio alongside the gateway. |
 | `--ssl-cert-file <FILE>` | Override `[Http2].ssl_cert_file` for this process. |
 | `--ssl-key-file <FILE>` | Override `[Http2].ssl_key_file` for this process. |
 
@@ -114,6 +115,29 @@ embystream run --config ./config.toml \
 ```
 
 Use this path when you intentionally want the legacy CLI gateway workflow instead of the Web Config Studio.
+
+### Toggling the Web Config Studio with an environment variable
+
+The `WEB_ENABLE` environment variable overrides the `--web` flag, so deployments
+can turn the studio on or off without editing the command line. This is the
+recommended switch for the Docker image, whose default command bakes in `--web`.
+
+| `WEB_ENABLE` | Effect |
+|--------------|--------|
+| unset (or unrecognized value) | Falls back to the `--web` flag. |
+| `1`, `true`, `yes`, `on`, `enable`, `enabled` | Force the studio **on**. |
+| `0`, `false`, `no`, `off`, `disable`, `disabled` | Force the studio **off**. |
+
+Values are case-insensitive and surrounding whitespace is ignored. The lower-case
+alias `web_enable` is also accepted.
+
+```bash
+# Binary: start the gateway without the studio even if a wrapper adds --web
+WEB_ENABLE=false embystream run --config ./config.toml --web
+
+# Docker: disable the studio without overriding the image command
+docker run -e WEB_ENABLE=false openpilipili/embystream:latest
+```
 
 ---
 
