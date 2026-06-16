@@ -29,6 +29,7 @@ video_missing_path = ""
 [Frontend]
 listen_port = 60001
 check_file_existence = false
+device_id_exempt_clients = []
 
 [[Frontend.PathRewrite]]
 enable = false
@@ -45,11 +46,6 @@ enable = false
 pattern = "^/stream(/.*)$"
 replacement = "/proxy$1"
 
-# `host` accepts a single domain (`host = "a.example.com"`) or a list
-# (`host = ["a.example.com", "b.example.com"]`). A request is allowed when its
-# Host header matches any entry; the single-string form stays supported.
-# A leading `*.` is a wildcard: `*.example.com` matches any subdomain but not
-# the apex `example.com` itself (list it explicitly to allow the apex too).
 [Frontend.AntiReverseProxy]
 enable = false
 host = ""
@@ -148,9 +144,6 @@ priority = 0
 proxy_mode = "proxy"
 client_speed_limit_kbs = 0
 client_burst_speed_kbs = 0
-# The root config template uses `proxy` as the easiest first validation mode.
-# Switch to `accel_redirect` after Google Drive lookup and token refresh are
-# known-good in your environment.
 
 [[BackendNode.PathRewrite]]
 enable = false
@@ -169,10 +162,6 @@ drive_id = ""
 drive_name = "SharedMedia"
 access_token = "replace_with_google_access_token"
 refresh_token = "replace_with_google_refresh_token"
-# `refresh_token` is the durable credential. `access_token` is only a cache
-# snapshot and may be rotated by EmbyStream. Runtime may also write back a
-# preferred `token = { access_token = ..., refresh_token = ..., token_type = ...,
-# expiry = ... }` blob later.
 
 [[BackendNode]]
 name = "RcloneWebDav"

@@ -101,6 +101,7 @@ fn frontend_section_full() -> Frontend {
         check_file_existence: false,
         path_rewrites: frontend_path_rewrites_full(),
         anti_reverse_proxy: anti_rev_default(),
+        device_id_exempt_clients: vec![],
     }
 }
 
@@ -114,6 +115,7 @@ fn frontend_section_dual() -> Frontend {
             replacement: "https://my-cdn.com$1".into(),
         }],
         anti_reverse_proxy: anti_rev_default(),
+        device_id_exempt_clients: vec![],
     }
 }
 

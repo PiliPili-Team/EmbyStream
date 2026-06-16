@@ -1085,6 +1085,7 @@ fn prompt_frontend_section() -> Result<Frontend> {
         check_file_existence: false,
         path_rewrites,
         anti_reverse_proxy: anti,
+        device_id_exempt_clients: vec![],
     })
 }
 

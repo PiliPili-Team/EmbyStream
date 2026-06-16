@@ -29,6 +29,7 @@ use crate::{
         request::Request as AppForwardRequest, sign::Sign,
         sign_encryptor::SignEncryptor,
     },
+    gateway::client_filter::UserAgentMatcher,
     util::{StringUtil, UriExt, UriExtError},
 };
 
@@ -150,6 +151,37 @@ impl AppForwardService {
         self.get_emby_api_token(request, false).await
     }
 
+    /// Returns `true` when the request's client identifier matches any entry
+    /// in `Frontend.device_id_exempt_clients`, meaning the `deviceId` check
+    /// should be skipped.
+    async fn is_device_id_exempt_client(
+        &self,
+        request: &AppForwardRequest,
+    ) -> bool {
+        let client = match request.client() {
+            Some(c) if !c.is_empty() => c,
+            _ => return false,
+        };
+
+        let config = self.state.get_config().await;
+        let exempt_list = match config.frontend.as_ref() {
+            Some(fe) => &fe.device_id_exempt_clients,
+            None => return false,
+        };
+
+        if exempt_list.is_empty() {
+            return false;
+        }
+
+        let client_lower = client.to_lowercase();
+        exempt_list.iter().any(|rule| {
+            UserAgentMatcher::is_ua_matching(
+                &client_lower,
+                &rule.to_lowercase(),
+            )
+        })
+    }
+
     async fn get_forward_info(
         &self,
         path_params: &PathParams,
@@ -160,9 +192,18 @@ impl AppForwardService {
             return Err(AppForwardError::EmptyEmbyToken);
         }
 
-        let device_id = self.get_device_id(request).await;
+        let mut device_id = self.get_device_id(request).await;
         if device_id.is_empty() {
-            return Err(AppForwardError::EmptyEmbyDeviceId);
+            if self.is_device_id_exempt_client(request).await {
+                device_id = emby_token.clone();
+                info_log!(
+                    FORWARD_LOGGER_DOMAIN,
+                    "device_id_exempt client={:?} fallback_to_emby_token",
+                    request.client().unwrap_or_default()
+                );
+            } else {
+                return Err(AppForwardError::EmptyEmbyDeviceId);
+            }
         }
 
         let playback_info_service =
