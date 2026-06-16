@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-/// Path patterns for Emby API and Web UI that are NOT in cacheable_routes.
+/// Path patterns for high-volume Emby API and Web UI traffic.
 /// These paths will use DEBUG level in LoggerMiddleware to reduce log noise.
 ///
 /// ## How to add a new pattern
@@ -17,8 +17,8 @@ static COMPILED_DEBUG_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         .collect()
 });
 
-/// Returns true if the path is a "non-cared" API path (Emby API or Web UI
-/// that is not in cacheable_routes). These should use DEBUG log level.
+/// Returns true if the path is a high-volume API path (Emby API or Web UI).
+/// These should use DEBUG log level.
 pub fn is_debug_path(path: &str) -> bool {
     COMPILED_DEBUG_PATTERNS.iter().any(|re| re.is_match(path))
 }

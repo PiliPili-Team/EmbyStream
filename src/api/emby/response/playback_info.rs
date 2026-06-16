@@ -20,6 +20,35 @@ impl PlaybackInfo {
             .find(|source| source.id.as_deref() == Some(target_id))
             .and_then(|source| source.path.as_deref())
     }
+
+    /// Selects the media source to stream for a forward request.
+    ///
+    /// A single PlaybackInfo response can describe several media sources (e.g.
+    /// a multi-version movie), so the caller must identify which one to route.
+    ///
+    /// Selection policy:
+    /// - When `media_source_id` is present, the source is matched by exact
+    ///   `Id`; no positional guessing is performed.
+    /// - When it is absent and the item exposes exactly one source, that source
+    ///   is used unambiguously.
+    /// - When it is absent and the item exposes multiple sources, the choice
+    ///   is genuinely ambiguous and `None` is returned so the caller can reject
+    ///   the request instead of streaming the wrong version.
+    pub fn select_media_source(
+        &self,
+        media_source_id: Option<&str>,
+    ) -> Option<&MediaSource> {
+        match media_source_id.map(str::trim).filter(|id| !id.is_empty()) {
+            Some(target_id) => self
+                .media_sources
+                .iter()
+                .find(|source| source.id.as_deref() == Some(target_id)),
+            None => match self.media_sources.as_slice() {
+                [single] => Some(single),
+                _ => None,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -283,6 +312,83 @@ mod tests {
             play_session_id: None,
         };
         assert!(info.find_media_source_path_by_id("src-a").is_none());
+    }
+
+    fn multi_source_info() -> PlaybackInfo {
+        PlaybackInfo {
+            media_sources: vec![
+                MediaSource {
+                    id: Some("src-a".into()),
+                    path: Some("/media/a.mkv".into()),
+                    ..Default::default()
+                },
+                MediaSource {
+                    id: Some("src-b".into()),
+                    path: Some("/media/b.mkv".into()),
+                    ..Default::default()
+                },
+            ],
+            play_session_id: None,
+        }
+    }
+
+    fn single_source_info() -> PlaybackInfo {
+        PlaybackInfo {
+            media_sources: vec![MediaSource {
+                id: Some("src-a".into()),
+                path: Some("/media/a.mkv".into()),
+                ..Default::default()
+            }],
+            play_session_id: None,
+        }
+    }
+
+    #[test]
+    fn test_select_media_source_matches_by_id() {
+        let info = multi_source_info();
+        let source = info.select_media_source(Some("src-b"));
+        assert_eq!(
+            source.and_then(|s| s.path.as_deref()),
+            Some("/media/b.mkv")
+        );
+    }
+
+    #[test]
+    fn test_select_media_source_unknown_id_returns_none() {
+        let info = multi_source_info();
+        assert!(info.select_media_source(Some("src-z")).is_none());
+    }
+
+    #[test]
+    fn test_select_media_source_single_source_without_id() {
+        let info = single_source_info();
+        let source = info.select_media_source(None);
+        assert_eq!(
+            source.and_then(|s| s.path.as_deref()),
+            Some("/media/a.mkv")
+        );
+    }
+
+    #[test]
+    fn test_select_media_source_single_source_blank_id() {
+        // A blank MediaSourceId is treated as absent.
+        let info = single_source_info();
+        let source = info.select_media_source(Some("   "));
+        assert_eq!(source.and_then(|s| s.id.as_deref()), Some("src-a"));
+    }
+
+    #[test]
+    fn test_select_media_source_multi_source_without_id_is_ambiguous() {
+        let info = multi_source_info();
+        // Multiple sources with no MediaSourceId must not be guessed.
+        assert!(info.select_media_source(None).is_none());
+    }
+
+    #[test]
+    fn test_select_media_source_empty_returns_none() {
+        let info = PlaybackInfo::default();
+        assert!(info.select_media_source(None).is_none());
+        assert!(info.select_media_source(Some("src-a")).is_none());
     }
 
     // ── MediaSource ───────────────────────────────────────────────────────────

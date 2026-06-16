@@ -1,4 +1,3 @@
-pub mod cacheable_routes;
 pub mod chain;
 pub mod client_filter;
 pub mod context;

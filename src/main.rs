@@ -477,7 +477,6 @@ async fn setup_frontend_gateway(
     let service = Arc::new(AppForwardService::new(app_state.clone()));
 
     let emby_base_url = config.emby.get_uri().to_string();
-    let api_cache = app_state.get_api_response_cache().await.clone();
 
     info_log!(
         INIT_LOGGER_DOMAIN,
@@ -500,7 +499,6 @@ async fn setup_frontend_gateway(
         .add_middleware(Box::new(ForwardMiddleware::new(service)))
         .add_middleware(Box::new(ReverseProxyMiddleware::new(
             emby_base_url,
-            api_cache,
             app_state.clone(),
         )));
 

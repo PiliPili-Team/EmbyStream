@@ -30,13 +30,11 @@ pub struct AppState {
     strm_file_cache: OnceCell<GeneralCache>,
     open_list_cache: OnceCell<GeneralCache>,
     local_metadata_cache: OnceCell<GeneralCache>,
-    api_response_cache: OnceCell<GeneralCache>,
     google_drive_file_id_cache: OnceCell<GeneralCache>,
     emby_client: OnceCell<Arc<EmbyClient>>,
     google_drive_client: OnceCell<Arc<GoogleDriveClient>>,
     open_list_client: OnceCell<Arc<OpenListClient>>,
     rate_limiter_cache: OnceCell<DashMap<String, RateLimiterCache>>,
-    pub(crate) api_request_locks: DashMap<String, Arc<TokioMutex<()>>>,
     pub(crate) open_list_request_locks: DashMap<String, Arc<TokioMutex<()>>>,
     pub(crate) playback_info_request_locks:
         DashMap<String, Arc<TokioMutex<()>>>,
@@ -65,13 +63,11 @@ impl AppState {
             strm_file_cache: OnceCell::new(),
             open_list_cache: OnceCell::new(),
             local_metadata_cache: OnceCell::new(),
-            api_response_cache: OnceCell::new(),
             google_drive_file_id_cache: OnceCell::new(),
             emby_client: OnceCell::new(),
             google_drive_client: OnceCell::new(),
             open_list_client: OnceCell::new(),
             rate_limiter_cache: OnceCell::new(),
-            api_request_locks: DashMap::new(),
             open_list_request_locks: DashMap::new(),
             playback_info_request_locks: DashMap::new(),
             strm_request_locks: DashMap::new(),
@@ -95,15 +91,6 @@ impl AppState {
             "low" => (256, 60 * 60 * 4),
             "high" => (2048, 60 * 60 * 12),
             _ => (512, 60 * 60 * 8),
-        }
-    }
-
-    pub async fn get_api_cache_settings(&self) -> (u64, u64) {
-        let config = self.get_config().await;
-        match config.general.memory_mode.as_str() {
-            "low" => (2048, 60 * 60 * 2),
-            "high" => (8192, 60 * 60 * 4),
-            _ => (4096, 60 * 60 * 2),
         }
     }
 
@@ -195,16 +182,6 @@ impl AppState {
             .get_or_init(
                 || async move { GeneralCache::new(capacity, 60 * 60 * 2) },
             )
-            .await
-    }
-
-    pub async fn get_api_response_cache(&self) -> &GeneralCache {
-        self.api_response_cache
-            .get_or_init(|| async move {
-                let (max_capacity, default_ttl) =
-                    self.get_api_cache_settings().await;
-                GeneralCache::new(max_capacity, default_ttl)
-            })
             .await
     }
 

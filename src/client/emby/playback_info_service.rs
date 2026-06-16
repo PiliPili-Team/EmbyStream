@@ -1,27 +1,28 @@
 use std::{sync::Arc, time::Instant};
 
-use hyper::Method;
-use serde_json::{Map as JsonMap, Value as JsonValue};
+use serde_json::Value as JsonValue;
 
 use crate::{
     AppState, PLAYBACK_INFO_LOGGER_DOMAIN, api::PlaybackInfo,
-    core::frontend::types::InfuseAuthorization, debug_log, info_log,
-    network::HttpMethod, util::StringUtil, warn_log,
+    cache::GeneralCache, core::frontend::types::InfuseAuthorization, debug_log,
+    info_log, network::HttpMethod, util::StringUtil, warn_log,
 };
 
 const SLOW_PLAYBACK_INFO_FETCH_THRESHOLD_MS: u128 = 500;
-const PLAYBACK_INFO_CACHE_KEY_PREFIX: &str = "playback:info";
-const PLAYBACK_INFO_METHOD_SEGMENT: &str = "method";
+const PLAYBACK_INFO_RESPONSE_KEY_PREFIX: &str = "playback:info:response";
+const PLAYBACK_INFO_ITEM_INDEX_KEY_PREFIX: &str = "playback:info:item_index";
 const PLAYBACK_INFO_ITEM_ID_SEGMENT: &str = "item_id";
-const PLAYBACK_INFO_MEDIA_SOURCE_ID_SEGMENT: &str = "media_source_id";
-const PLAYBACK_INFO_CONTENT_TYPE_HASH_SEGMENT: &str = "content_type_hash";
-const PLAYBACK_INFO_BODY_HASH_SEGMENT: &str = "body_hash";
 const PLAYBACK_INFO_ITEMS_SEGMENT: &str = "Items";
 const PLAYBACK_INFO_PATH_SEGMENT: &str = "PlaybackInfo";
-const PLAYBACK_INFO_MEDIA_SOURCE_ID_QUERY_KEY: &str = "MediaSourceId";
+const PLAYBACK_INFO_IGNORED_QUERY_KEYS: &[&str] = &["api_key", "x-emby-token"];
 const CONTENT_TYPE_JSON: &str = "application/json";
 const CONTENT_TYPE_FORM_URLENCODED: &str = "application/x-www-form-urlencoded";
 
+/// A request to fetch PlaybackInfo from Emby.
+///
+/// EmbyStream issues PlaybackInfo fetches via POST (mirroring the client), so
+/// `media_source_id` is optional — Emby returns every media source for the item
+/// when it is empty, which is exactly what stream-path lookup needs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlaybackInfoRequest {
     pub item_id: String,
@@ -48,72 +49,9 @@ impl PlaybackInfoRequest {
         }
     }
 
-    pub fn cache_key(&self) -> Result<String, PlaybackInfoServiceError> {
-        let item_id = self.item_id.trim();
-        if item_id.is_empty() {
-            return Err(PlaybackInfoServiceError::InvalidItemId);
-        }
-
-        let media_source_id = self.media_source_id.trim();
-        if media_source_id.is_empty() {
-            return Err(PlaybackInfoServiceError::InvalidMediaSourceId);
-        }
-
-        let method = self.method.to_string().to_ascii_lowercase();
-        let mut key = format!(
-            "{PLAYBACK_INFO_CACHE_KEY_PREFIX}:{PLAYBACK_INFO_METHOD_SEGMENT}:{method}:{PLAYBACK_INFO_ITEM_ID_SEGMENT}:{}:{PLAYBACK_INFO_MEDIA_SOURCE_ID_SEGMENT}:{}",
-            item_id.to_ascii_lowercase(),
-            media_source_id.to_ascii_lowercase()
-        );
-
-        if matches!(self.method, HttpMethod::Post) {
-            let body_hash = self
-                .body
-                .as_deref()
-                .map(|body| Self::body_hash(self.content_type.as_deref(), body))
-                .unwrap_or_default();
-            let content_type_hash = self
-                .content_type
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| StringUtil::hash_hex(&value.to_ascii_lowercase()))
-                .unwrap_or_default();
-            key.push_str(&format!(
-                ":{PLAYBACK_INFO_CONTENT_TYPE_HASH_SEGMENT}:{content_type_hash}:{PLAYBACK_INFO_BODY_HASH_SEGMENT}:{body_hash}"
-            ));
-        }
-
-        Ok(key)
-    }
-
-    pub fn from_http_parts(
-        path: &str,
-        query: Option<&str>,
-        method: &Method,
-        body: Option<&[u8]>,
-        content_type: Option<&str>,
-    ) -> Result<Self, PlaybackInfoServiceError> {
-        let item_id = Self::item_id_from_path(path)
-            .ok_or(PlaybackInfoServiceError::InvalidItemId)?;
-        let media_source_id = Self::media_source_id_from_query(query)
-            .or_else(|| Self::media_source_id_from_body(body, content_type))
-            .ok_or(PlaybackInfoServiceError::InvalidMediaSourceId)?;
-        let method = match *method {
-            Method::GET => HttpMethod::Get,
-            Method::POST => HttpMethod::Post,
-            _ => return Err(PlaybackInfoServiceError::UnsupportedMethod),
-        };
-        Ok(Self::new(
-            item_id,
-            media_source_id,
-            method,
-            body.map(|bytes| bytes.to_vec()),
-            content_type.map(str::to_string),
-        ))
-    }
-
-    fn item_id_from_path(path: &str) -> Option<String> {
+    /// Extracts the item id from an Emby PlaybackInfo path such as
+    /// `/emby/Items/{item_id}/PlaybackInfo` (the `emby/` prefix is optional).
+    pub fn item_id_from_path(path: &str) -> Option<String> {
         let segments: Vec<&str> = path
             .split('/')
             .filter(|segment| !segment.is_empty())
@@ -131,158 +69,11 @@ impl PlaybackInfoRequest {
             .and_then(|window| window.get(1))
             .map(|segment| (*segment).to_string())
     }
-
-    fn media_source_id_from_query(query: Option<&str>) -> Option<String> {
-        query.and_then(|query_str| {
-            form_urlencoded::parse(query_str.as_bytes())
-                .find(|(key, _)| Self::is_media_source_id_key(key))
-                .map(|(_, value)| value.into_owned())
-        })
-    }
-
-    fn media_source_id_from_body(
-        body: Option<&[u8]>,
-        content_type: Option<&str>,
-    ) -> Option<String> {
-        let body = body?;
-        let trimmed = std::str::from_utf8(body).ok()?.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        match Self::normalized_content_type(content_type) {
-            Some(CONTENT_TYPE_JSON) => Self::media_source_id_from_json(trimmed),
-            Some(CONTENT_TYPE_FORM_URLENCODED) => {
-                Self::media_source_id_from_form(trimmed)
-            }
-            Some("text/plain") | None => {
-                Self::media_source_id_from_json(trimmed)
-                    .or_else(|| Self::media_source_id_from_form(trimmed))
-            }
-            _ => None,
-        }
-    }
-
-    fn media_source_id_from_json(body: &str) -> Option<String> {
-        let value = serde_json::from_str::<JsonValue>(body).ok()?;
-        match value {
-            JsonValue::Object(map) => {
-                map.into_iter().find_map(|(key, value)| {
-                    if !Self::is_media_source_id_key(&key) {
-                        return None;
-                    }
-                    value
-                        .as_str()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_string)
-                })
-            }
-            _ => None,
-        }
-    }
-
-    fn media_source_id_from_form(body: &str) -> Option<String> {
-        form_urlencoded::parse(body.as_bytes())
-            .find(|(key, _)| Self::is_media_source_id_key(key))
-            .map(|(_, value)| value.into_owned())
-    }
-
-    fn is_media_source_id_key(key: &str) -> bool {
-        key.eq_ignore_ascii_case(PLAYBACK_INFO_MEDIA_SOURCE_ID_QUERY_KEY)
-            || key.eq_ignore_ascii_case("mediaSourceId")
-            || key.eq_ignore_ascii_case("media_source_id")
-    }
-
-    fn body_hash(content_type: Option<&str>, body: &[u8]) -> String {
-        match Self::normalized_content_type(content_type) {
-            Some(CONTENT_TYPE_JSON) => Self::json_body_hash(body),
-            Some(CONTENT_TYPE_FORM_URLENCODED) => Self::form_body_hash(body),
-            _ => StringUtil::hash_bytes(body),
-        }
-    }
-
-    fn normalized_content_type(content_type: Option<&str>) -> Option<&str> {
-        content_type
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .and_then(|value| value.split(';').next())
-            .map(str::trim)
-    }
-
-    fn json_body_hash(body: &[u8]) -> String {
-        let canonical_json = serde_json::from_slice::<JsonValue>(body)
-            .map(Self::canonicalize_json_value)
-            .and_then(|value| serde_json::to_vec(&value))
-            .unwrap_or_else(|_| body.to_vec());
-        StringUtil::hash_bytes(&canonical_json)
-    }
-
-    fn canonicalize_json_value(value: JsonValue) -> JsonValue {
-        match value {
-            JsonValue::Array(values) => JsonValue::Array(
-                values
-                    .into_iter()
-                    .map(Self::canonicalize_json_value)
-                    .collect(),
-            ),
-            JsonValue::Object(map) => {
-                let mut entries: Vec<(String, JsonValue)> = map
-                    .into_iter()
-                    .map(|(key, value)| {
-                        (key, Self::canonicalize_json_value(value))
-                    })
-                    .collect();
-                entries.sort_by(|(left_key, _), (right_key, _)| {
-                    left_key.cmp(right_key)
-                });
-                let canonical_map: JsonMap<String, JsonValue> =
-                    entries.into_iter().collect();
-                JsonValue::Object(canonical_map)
-            }
-            other => other,
-        }
-    }
-
-    fn form_body_hash(body: &[u8]) -> String {
-        let Ok(form_body) = std::str::from_utf8(body) else {
-            return StringUtil::hash_bytes(body);
-        };
-        let trimmed = form_body.trim();
-        if trimmed.is_empty() {
-            return String::new();
-        }
-
-        let mut form_pairs: Vec<(String, String)> =
-            form_urlencoded::parse(trimmed.as_bytes())
-                .map(|(key, value)| (key.into_owned(), value.into_owned()))
-                .collect();
-        form_pairs.sort_by(
-            |(left_key, left_value), (right_key, right_value)| {
-                left_key
-                    .to_ascii_lowercase()
-                    .cmp(&right_key.to_ascii_lowercase())
-                    .then_with(|| left_value.cmp(right_value))
-            },
-        );
-
-        let normalized_form = form_urlencoded::Serializer::new(String::new())
-            .extend_pairs(
-                form_pairs
-                    .iter()
-                    .map(|(key, value)| (key.as_str(), value.as_str())),
-            )
-            .finish();
-
-        StringUtil::hash_hex(&normalized_form)
-    }
 }
 
 #[derive(Debug)]
 pub enum PlaybackInfoServiceError {
     InvalidItemId,
-    InvalidMediaSourceId,
-    UnsupportedMethod,
     EmptyApiToken,
     Upstream(anyhow::Error),
 }
@@ -291,12 +82,6 @@ impl std::fmt::Display for PlaybackInfoServiceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidItemId => write!(f, "invalid playback info item id"),
-            Self::InvalidMediaSourceId => {
-                write!(f, "invalid playback info media source id")
-            }
-            Self::UnsupportedMethod => {
-                write!(f, "unsupported playback info method")
-            }
             Self::EmptyApiToken => write!(f, "empty playback info api token"),
             Self::Upstream(error) => {
                 write!(f, "playback info upstream: {error}")
@@ -317,26 +102,175 @@ impl PlaybackInfoService {
         Self { state }
     }
 
-    pub async fn get(
-        &self,
-        request: &PlaybackInfoRequest,
-        api_token: Option<&str>,
-    ) -> Result<PlaybackInfo, PlaybackInfoServiceError> {
-        let cache_key = request.cache_key()?;
-        let cache = self.state.get_playback_info_cache().await;
+    /// Builds the response cache key for a PlaybackInfo request.
+    ///
+    /// The key is a normalized hash over the item id plus every query key/value
+    /// pair (keys lowercased, pairs sorted, auth credentials excluded). Distinct
+    /// request parameters make Emby return slightly different responses, so they
+    /// must map to distinct cache entries; requests that differ only in
+    /// parameter order share a single entry.
+    pub fn response_cache_key(item_id: &str, query: Option<&str>) -> String {
+        let normalized = format!(
+            "{}|{}",
+            item_id.trim().to_ascii_lowercase(),
+            Self::canonical_query(query)
+        );
+        let digest = StringUtil::hash_hex(&normalized);
+        format!("{PLAYBACK_INFO_RESPONSE_KEY_PREFIX}:hash:{digest}")
+    }
 
-        if let Some(cached) = cache.get::<PlaybackInfo>(&cache_key) {
+    fn canonical_query(query: Option<&str>) -> String {
+        let Some(query) = query.map(str::trim).filter(|q| !q.is_empty()) else {
+            return String::new();
+        };
+
+        let mut pairs: Vec<(String, String)> =
+            form_urlencoded::parse(query.as_bytes())
+                .filter_map(|(key, value)| {
+                    let key = key.to_ascii_lowercase();
+                    if PLAYBACK_INFO_IGNORED_QUERY_KEYS.contains(&key.as_str())
+                    {
+                        return None;
+                    }
+                    Some((key, value.into_owned()))
+                })
+                .collect();
+        pairs.sort_by(|(left_key, left_value), (right_key, right_value)| {
+            left_key
+                .cmp(right_key)
+                .then_with(|| left_value.cmp(right_value))
+        });
+
+        form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(
+                pairs
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            )
+            .finish()
+    }
+
+    fn item_index_cache_key(
+        item_id: &str,
+    ) -> Result<String, PlaybackInfoServiceError> {
+        let item_id = item_id.trim();
+        if item_id.is_empty() {
+            return Err(PlaybackInfoServiceError::InvalidItemId);
+        }
+        Ok(format!(
+            "{PLAYBACK_INFO_ITEM_INDEX_KEY_PREFIX}:{PLAYBACK_INFO_ITEM_ID_SEGMENT}:{}",
+            item_id.to_ascii_lowercase()
+        ))
+    }
+
+    fn store_item_index_into(
+        cache: &GeneralCache,
+        item_id: &str,
+        playback_info: &PlaybackInfo,
+    ) {
+        let Ok(index_key) = Self::item_index_cache_key(item_id) else {
+            return;
+        };
+        cache.insert(index_key.clone(), playback_info.clone());
+        info_log!(
+            PLAYBACK_INFO_LOGGER_DOMAIN,
+            "playback_info_item_index_store key={} media_sources={}",
+            index_key,
+            playback_info.media_sources.len()
+        );
+    }
+
+    /// Returns the cached PlaybackInfo response JSON for a key, if present.
+    pub async fn cached_response(&self, cache_key: &str) -> Option<String> {
+        let cache = self.state.get_playback_info_cache().await;
+        let cached = cache.get::<String>(cache_key);
+        if cached.is_some() {
             info_log!(
                 PLAYBACK_INFO_LOGGER_DOMAIN,
-                "playback_info_cache_hit key={}",
+                "playback_info_response_cache_hit key={}",
                 cache_key
+            );
+        }
+        cached
+    }
+
+    /// Caches a PlaybackInfo response and indexes its media sources by item id.
+    ///
+    /// The raw upstream JSON is stored verbatim under `cache_key` for byte-
+    /// faithful replay to clients. The parsed media sources are indexed by item
+    /// id so stream requests — which omit `MediaSourceId` — can derive a path
+    /// without a redundant Emby round-trip.
+    pub async fn store_response_and_index(
+        &self,
+        cache_key: &str,
+        item_id: &str,
+        body: &[u8],
+    ) {
+        let cache = self.state.get_playback_info_cache().await;
+
+        match std::str::from_utf8(body) {
+            Ok(text) => {
+                cache.insert(cache_key.to_string(), text.to_string());
+                info_log!(
+                    PLAYBACK_INFO_LOGGER_DOMAIN,
+                    "playback_info_response_cache_store key={} bytes={}",
+                    cache_key,
+                    body.len()
+                );
+            }
+            Err(error) => {
+                warn_log!(
+                    PLAYBACK_INFO_LOGGER_DOMAIN,
+                    "playback_info_response_non_utf8 key={} error={}",
+                    cache_key,
+                    error
+                );
+                return;
+            }
+        }
+
+        match serde_json::from_slice::<PlaybackInfo>(body) {
+            Ok(playback_info) => {
+                Self::store_item_index_into(cache, item_id, &playback_info)
+            }
+            Err(error) => {
+                warn_log!(
+                    PLAYBACK_INFO_LOGGER_DOMAIN,
+                    "playback_info_index_parse_failed item_id={} error={}",
+                    item_id,
+                    error
+                );
+            }
+        }
+    }
+
+    /// Loads the full PlaybackInfo for an item, keyed purely by item id.
+    ///
+    /// Prefers the item index populated by earlier PlaybackInfo traffic and
+    /// falls back to a single Emby POST on a miss. The POST returns every media
+    /// source for the item, so it works even when `media_source_id` is absent —
+    /// exactly the case for stream requests that omit it.
+    pub async fn get_or_fetch_by_item_id(
+        &self,
+        item_id: &str,
+        media_source_id: Option<&str>,
+        api_token: Option<&str>,
+    ) -> Result<PlaybackInfo, PlaybackInfoServiceError> {
+        let index_key = Self::item_index_cache_key(item_id)?;
+        let cache = self.state.get_playback_info_cache().await;
+
+        if let Some(cached) = cache.get::<PlaybackInfo>(&index_key) {
+            info_log!(
+                PLAYBACK_INFO_LOGGER_DOMAIN,
+                "playback_info_item_index_hit key={}",
+                index_key
             );
             return Ok(cached);
         }
 
         let lock = AppState::request_lock(
             &self.state.playback_info_request_locks,
-            &cache_key,
+            &index_key,
         );
 
         let result = {
@@ -344,11 +278,12 @@ impl PlaybackInfoService {
             let _guard = lock.lock().await;
             let wait_ms = wait_start.elapsed().as_millis();
 
-            if let Some(cached) = cache.get::<PlaybackInfo>(&cache_key) {
+            if let Some(cached) = cache.get::<PlaybackInfo>(&index_key) {
                 info_log!(
                     PLAYBACK_INFO_LOGGER_DOMAIN,
-                    "playback_info_inflight_wait_hit key={} lock_wait_ms={}",
-                    cache_key,
+                    "playback_info_item_index_inflight_wait_hit key={} \
+                     lock_wait_ms={}",
+                    index_key,
                     wait_ms
                 );
                 Ok(cached)
@@ -358,46 +293,45 @@ impl PlaybackInfoService {
                     .filter(|token| !token.is_empty())
                     .ok_or(PlaybackInfoServiceError::EmptyApiToken)?;
 
+                let request = PlaybackInfoRequest::new(
+                    item_id,
+                    media_source_id.unwrap_or_default(),
+                    HttpMethod::Post,
+                    None,
+                    None,
+                );
+
                 let fetch_start = Instant::now();
                 let playback_info =
-                    self.fetch_from_emby(request, token).await?;
+                    self.fetch_from_emby(&request, token).await?;
                 let fetch_ms = fetch_start.elapsed().as_millis();
 
                 if fetch_ms >= SLOW_PLAYBACK_INFO_FETCH_THRESHOLD_MS {
                     warn_log!(
                         PLAYBACK_INFO_LOGGER_DOMAIN,
-                        "playback_info_fetch_slow item_id={} media_source_id={} \
+                        "playback_info_item_index_fetch_slow item_id={} \
                          elapsed_ms={}",
-                        request.item_id,
-                        request.media_source_id,
+                        item_id,
                         fetch_ms
                     );
                 } else {
                     debug_log!(
                         PLAYBACK_INFO_LOGGER_DOMAIN,
-                        "playback_info_fetch_complete item_id={} media_source_id={} \
+                        "playback_info_item_index_fetch_complete item_id={} \
                          elapsed_ms={}",
-                        request.item_id,
-                        request.media_source_id,
+                        item_id,
                         fetch_ms
                     );
                 }
 
-                cache.insert(cache_key.clone(), playback_info.clone());
-                info_log!(
-                    PLAYBACK_INFO_LOGGER_DOMAIN,
-                    "playback_info_cache_store key={} media_sources={}",
-                    cache_key,
-                    playback_info.media_sources.len()
-                );
-
+                Self::store_item_index_into(cache, item_id, &playback_info);
                 Ok(playback_info)
             }
         };
 
         AppState::cleanup_request_lock(
             &self.state.playback_info_request_locks,
-            &cache_key,
+            &index_key,
             &lock,
         );
 
@@ -524,178 +458,110 @@ impl PlaybackInfoService {
 
 #[cfg(test)]
 mod tests {
-    use hyper::Method;
-
-    use super::{
-        CONTENT_TYPE_FORM_URLENCODED, CONTENT_TYPE_JSON, PlaybackInfoRequest,
-        PlaybackInfoService,
-    };
-    use crate::network::HttpMethod;
+    use super::{CONTENT_TYPE_JSON, PlaybackInfoRequest, PlaybackInfoService};
 
     #[test]
-    fn playback_info_request_parses_get_path() {
-        let request = PlaybackInfoRequest::from_http_parts(
-            "/emby/Items/249971/PlaybackInfo",
-            Some("MediaSourceId=abc123&UserId=u1"),
-            &Method::GET,
-            None,
-            None,
-        );
-
-        assert!(request.is_ok());
-        if let Ok(request) = request {
-            assert_eq!(request.item_id, "249971");
-            assert_eq!(request.media_source_id, "abc123");
-        }
-    }
-
-    #[test]
-    fn playback_info_request_accepts_path_without_emby_prefix() {
-        let request = PlaybackInfoRequest::from_http_parts(
-            "/Items/249971/PlaybackInfo",
-            Some("MediaSourceId=abc123"),
-            &Method::GET,
-            None,
-            None,
-        );
-
-        assert!(request.is_ok());
-        if let Ok(request) = request {
-            assert_eq!(request.item_id, "249971");
-            assert_eq!(request.media_source_id, "abc123");
-        }
-    }
-
-    #[test]
-    fn playback_info_request_parses_media_source_id_from_json_body() {
-        let request = PlaybackInfoRequest::from_http_parts(
-            "/emby/Items/249971/PlaybackInfo",
-            Some("reqformat=json"),
-            &Method::POST,
-            Some(br#"{"MediaSourceId":"abc123"}"#),
-            Some(CONTENT_TYPE_JSON),
-        );
-
-        assert!(request.is_ok());
-        if let Ok(request) = request {
-            assert_eq!(request.item_id, "249971");
-            assert_eq!(request.media_source_id, "abc123");
-        }
-    }
-
-    #[test]
-    fn playback_info_request_parses_media_source_id_from_form_body() {
-        let request = PlaybackInfoRequest::from_http_parts(
-            "/emby/Items/249971/PlaybackInfo",
-            None,
-            &Method::POST,
-            Some(b"MediaSourceId=abc123"),
-            Some(CONTENT_TYPE_FORM_URLENCODED),
-        );
-
-        assert!(request.is_ok());
-        if let Ok(request) = request {
-            assert_eq!(request.media_source_id, "abc123");
-        }
-    }
-
-    #[test]
-    fn playback_info_cache_key_includes_method() {
-        let request = PlaybackInfoRequest::new(
-            "249971",
-            "ABC123",
-            HttpMethod::Get,
-            None,
-            None,
-        );
-        let cache_key = request.cache_key();
-
-        assert!(cache_key.is_ok());
+    fn item_id_from_path_extracts_id_with_emby_prefix() {
         assert_eq!(
-            cache_key.unwrap_or_default(),
-            "playback:info:method:get:item_id:249971:media_source_id:abc123"
+            PlaybackInfoRequest::item_id_from_path(
+                "/emby/Items/249971/PlaybackInfo"
+            ),
+            Some("249971".to_string())
         );
     }
 
     #[test]
-    fn playback_info_cache_key_for_post_includes_body_hash() {
-        let request = PlaybackInfoRequest::new(
-            "249971",
-            "ABC123",
-            HttpMethod::Post,
-            Some(br#"{"AutoOpenLiveStream":true}"#.to_vec()),
-            Some("application/json".to_string()),
+    fn item_id_from_path_extracts_id_without_emby_prefix() {
+        assert_eq!(
+            PlaybackInfoRequest::item_id_from_path(
+                "/Items/249971/PlaybackInfo"
+            ),
+            Some("249971".to_string())
         );
-
-        let cache_key = request.cache_key();
-
-        assert!(cache_key.is_ok());
-        let cache_key = cache_key.unwrap_or_default();
-        assert!(cache_key.starts_with(
-            "playback:info:method:post:item_id:249971:media_source_id:abc123"
-        ));
-        assert!(cache_key.contains(":content_type_hash:"));
-        assert!(cache_key.contains(":body_hash:"));
     }
 
     #[test]
-    fn playback_info_json_body_hash_ignores_object_key_order() {
-        let request1 = PlaybackInfoRequest::new(
-            "249971",
-            "ABC123",
-            HttpMethod::Post,
-            Some(br#"{"B":2,"A":1}"#.to_vec()),
-            Some(CONTENT_TYPE_JSON.to_string()),
+    fn item_id_from_path_rejects_non_playback_info_path() {
+        assert!(
+            PlaybackInfoRequest::item_id_from_path("/emby/Items/249971")
+                .is_none()
         );
-        let request2 = PlaybackInfoRequest::new(
-            "249971",
-            "ABC123",
-            HttpMethod::Post,
-            Some(br#"{"A":1,"B":2}"#.to_vec()),
-            Some(CONTENT_TYPE_JSON.to_string()),
-        );
-
-        assert_eq!(request1.cache_key().ok(), request2.cache_key().ok());
     }
 
     #[test]
-    fn playback_info_json_body_hash_preserves_array_order() {
-        let request1 = PlaybackInfoRequest::new(
-            "249971",
-            "ABC123",
-            HttpMethod::Post,
-            Some(br#"{"A":[1,2]}"#.to_vec()),
-            Some(CONTENT_TYPE_JSON.to_string()),
+    fn response_cache_key_is_query_order_independent() {
+        let key1 = PlaybackInfoService::response_cache_key(
+            "23090",
+            Some("IsPlayback=false&reqformat=json&StartTimeTicks=0"),
         );
-        let request2 = PlaybackInfoRequest::new(
-            "249971",
-            "ABC123",
-            HttpMethod::Post,
-            Some(br#"{"A":[2,1]}"#.to_vec()),
-            Some(CONTENT_TYPE_JSON.to_string()),
+        let key2 = PlaybackInfoService::response_cache_key(
+            "23090",
+            Some("StartTimeTicks=0&reqformat=json&IsPlayback=false"),
         );
 
-        assert_ne!(request1.cache_key().ok(), request2.cache_key().ok());
+        assert_eq!(key1, key2);
+        assert!(key1.starts_with("playback:info:response:hash:"));
     }
 
     #[test]
-    fn playback_info_form_body_hash_ignores_pair_order() {
-        let request1 = PlaybackInfoRequest::new(
-            "249971",
-            "ABC123",
-            HttpMethod::Post,
-            Some(b"X=1&Y=2".to_vec()),
-            Some(CONTENT_TYPE_FORM_URLENCODED.to_string()),
+    fn response_cache_key_is_item_id_case_insensitive() {
+        let lower = PlaybackInfoService::response_cache_key("abc", Some("a=1"));
+        let upper = PlaybackInfoService::response_cache_key("ABC", Some("a=1"));
+
+        assert_eq!(lower, upper);
+    }
+
+    #[test]
+    fn response_cache_key_differs_on_query_value() {
+        let low_bitrate = PlaybackInfoService::response_cache_key(
+            "23090",
+            Some("MaxStreamingBitrate=500000"),
         );
-        let request2 = PlaybackInfoRequest::new(
-            "249971",
-            "ABC123",
-            HttpMethod::Post,
-            Some(b"Y=2&X=1".to_vec()),
-            Some(CONTENT_TYPE_FORM_URLENCODED.to_string()),
+        let high_bitrate = PlaybackInfoService::response_cache_key(
+            "23090",
+            Some("MaxStreamingBitrate=999999"),
         );
 
-        assert_eq!(request1.cache_key().ok(), request2.cache_key().ok());
+        assert_ne!(low_bitrate, high_bitrate);
+    }
+
+    #[test]
+    fn response_cache_key_differs_on_item_id() {
+        let item_a =
+            PlaybackInfoService::response_cache_key("23090", Some("a=1"));
+        let item_b =
+            PlaybackInfoService::response_cache_key("73426", Some("a=1"));
+
+        assert_ne!(item_a, item_b);
+    }
+
+    #[test]
+    fn response_cache_key_ignores_auth_credentials() {
+        let with_token = PlaybackInfoService::response_cache_key(
+            "23090",
+            Some("reqformat=json&api_key=secret&X-Emby-Token=tok"),
+        );
+        let without_token = PlaybackInfoService::response_cache_key(
+            "23090",
+            Some("reqformat=json"),
+        );
+
+        assert_eq!(with_token, without_token);
+    }
+
+    #[test]
+    fn item_index_cache_key_is_media_source_independent() {
+        let key = PlaybackInfoService::item_index_cache_key("Item-42");
+
+        assert_eq!(
+            key.unwrap_or_default(),
+            "playback:info:item_index:item_id:item-42"
+        );
+    }
+
+    #[test]
+    fn item_index_cache_key_rejects_blank_item_id() {
+        assert!(PlaybackInfoService::item_index_cache_key("   ").is_err());
     }
 
     #[test]

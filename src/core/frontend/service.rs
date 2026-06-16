@@ -22,10 +22,7 @@ use crate::{
     AppState, FORWARD_LOGGER_DOMAIN, debug_log, error_log, info_log, warn_log,
 };
 use crate::{
-    HttpMethod,
-    client::{
-        PlaybackInfoRequest, PlaybackInfoService, PlaybackInfoServiceError,
-    },
+    client::{PlaybackInfoService, PlaybackInfoServiceError},
     core::{
         backend::session_id::generate_playback_session_id,
         error::Error as AppForwardError, redirect_info::RedirectInfo,
@@ -170,15 +167,18 @@ impl AppForwardService {
 
         let playback_info_service =
             PlaybackInfoService::new(self.state.clone());
+
+        let media_source_id = path_params.media_source_id.trim();
+        let media_source_id =
+            (!media_source_id.is_empty()).then_some(media_source_id);
+
+        // Look up the full media-source list by item id. The item index is
+        // normally warmed by the client's preceding PlaybackInfo POST; a cold
+        // index falls back to a single Emby POST that returns every source.
         let playback_info = playback_info_service
-            .get(
-                &PlaybackInfoRequest::new(
-                    path_params.item_id.clone(),
-                    path_params.media_source_id.clone(),
-                    HttpMethod::Get,
-                    None,
-                    None,
-                ),
+            .get_or_fetch_by_item_id(
+                &path_params.item_id,
+                media_source_id,
                 Some(emby_token.as_str()),
             )
             .await
@@ -195,23 +195,42 @@ impl AppForwardService {
                 AppForwardError::EmbyPathRequestError
             })?;
 
-        let forward_info = playback_info
-            .find_media_source_path_by_id(&path_params.media_source_id)
-            .map(|path| ForwardInfo {
-                item_id: path_params.item_id.clone(),
-                media_source_id: path_params.media_source_id.clone(),
-                path: path.to_string(),
-                device_id,
-                playback_session_id: generate_playback_session_id(),
-            })
+        // Match by exact MediaSourceId when present; for a single-source item a
+        // missing id selects unambiguously. A missing id on a multi-source
+        // item is rejected rather than guessed.
+        let media_source = playback_info
+            .select_media_source(media_source_id)
             .ok_or_else(|| {
-                error_log!(
-                    FORWARD_LOGGER_DOMAIN,
-                    "Media source not found: {}",
-                    path_params.media_source_id
-                );
-                AppForwardError::EmbyPathParserError
-            })?;
+            error_log!(
+                FORWARD_LOGGER_DOMAIN,
+                "Media source unmatched item_id={} media_source_id={:?} \
+                     available_sources={}",
+                path_params.item_id,
+                media_source_id,
+                playback_info.media_sources.len()
+            );
+            AppForwardError::EmbyPathParserError
+        })?;
+
+        let selected_media_source_id =
+            media_source.id.clone().unwrap_or_default();
+        let path = media_source.path.clone().ok_or_else(|| {
+            error_log!(
+                FORWARD_LOGGER_DOMAIN,
+                "Media source has no path item_id={} media_source_id={}",
+                path_params.item_id,
+                selected_media_source_id
+            );
+            AppForwardError::EmbyPathParserError
+        })?;
+
+        let forward_info = ForwardInfo {
+            item_id: path_params.item_id.clone(),
+            media_source_id: selected_media_source_id,
+            path,
+            device_id,
+            playback_session_id: generate_playback_session_id(),
+        };
 
         info_log!(
             FORWARD_LOGGER_DOMAIN,
