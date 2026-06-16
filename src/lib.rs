@@ -25,11 +25,11 @@ pub mod test_support;
 pub mod util;
 pub mod web;
 
-pub use api::{EmbyAPI, OpenListAPI, PhotoMessage, TelegramAPI, TextMessage};
+pub use api::{EmbyAPI, OpenListAPI};
 pub use app::*;
 pub use cache::{FileMetadata, GeneralCache};
 pub use client::GoogleDriveClient;
-pub use client::{ClientBuilder, EmbyClient, OpenListClient, TelegramClient};
+pub use client::{ClientBuilder, EmbyClient, OpenListClient};
 pub use core::*;
 pub use crypto::*;
 pub use domain::*;
